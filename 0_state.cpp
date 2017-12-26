@@ -8,8 +8,8 @@ int main (int argc, char **argv) {
 
     c.load("p.pl");
 
-    c.bind("%::sa", str);
-    c.bind("$::ma", m);
+    c.bind("$::sa", str);
+    c.bind("%::ma", m);
     c.execute("$::sa = \"Hello\"; $::ma{'a'} = 1; print ('Ret:'.$::ma{'a'}.\"\n\");");
     assert(m["a"] == "1");
     assert(str == "Hello");

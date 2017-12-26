@@ -142,6 +142,8 @@ public:
     bool bind(std::string str, Map_Type &m) {
         const char *n = str.c_str(); char c;
         c = (*n++);
+        if (c != '%')
+            return false;
         HV *hash = get_hv(n, GV_ADD);
         HV *inter = newHV();
         SV *tie = newRV_noinc((SV*)inter);
@@ -162,6 +164,8 @@ public:
 
         const char *n = str.c_str(); char c;
         c = (*n++);
+        if (c != '$')
+            return false;
         SV *sv = get_sv(n, GV_ADD);
         SV *inter = newSVpv(m.c_str(),0);
         SV *tie = newRV_noinc((SV*)inter);

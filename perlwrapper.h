@@ -1,3 +1,5 @@
+#pragma once
+
 #ifndef PERL_WRAPPER_H
 #define PERL_WRAPPER_H
 
@@ -19,6 +21,16 @@
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
+#include <iostream>
+#include <fstream>
+#include <streambuf>
+
+#define DO_DBG_PRINTF
+#ifdef DO_DBG_PRINTF
+#define DBG_PRINTF(format, ...) printf (format, ##__VA_ARGS__)
+#else
+#define DBG_PRINTF(format, ...) do {} while(0)
+#endif
 
 /* note: run and add to g++ compile
 PERL_CCOPTS=$(shell perl -MExtUtils::Embed -e ccopts)
@@ -26,10 +38,52 @@ PERL_LDOPTS=$(shell perl -MExtUtils::Embed -e ldopts)
 */
 #include <EXTERN.h>               /* from the Perl distribution     */
 #include <perl.h>                 /* from the Perl distribution     */
+#include "XSUB.h"
+
+XS(XS_some_func);
+
+int         perl_free (pTHX_ SV *sv, MAGIC* mg)
+{
+    printf("Cv free called \n");
+    return 0;
+}
+
+STATIC MGVTBL my_vtbl = { 0, 0, 0, 0, perl_free, 0, 0, 0 };
+struct my_priv_data_t {
+    int a;
+};
+
+struct my_priv_data_t a{0xfafa};
+
+class PerlContext;
+
+
+
+
 
 class PerlContext {
-    enum Globals_t { Globals }; // tag for "global variables"
+private:
+    PerlInterpreter *my_perl = nullptr;
 public:
+
+    template <typename Val>
+    struct tie_data {
+        class PerlContext *ctx;
+        Val &v;
+    };
+
+    typedef std::map<std::string, std::string> Map_Type;
+    typedef std::string Scalar_Type;
+    typedef tie_data<Map_Type> Map_Tie;
+    typedef tie_data<std::string> Scalar_Tie;
+
+    int num;
+    enum Globals_t { Globals }; // tag for "global variables"
+
+    CV *PerlWrapper_Hash_STORE;
+    CV *PerlWrapper_Hash_FETCH;
+    CV *PerlWrapper_Scalar_STORE;
+    CV *PerlWrapper_Scalar_FETCH;
 
     explicit PerlContext()
     {
@@ -50,87 +104,223 @@ public:
         perl_parse(my_perl, /*f*/ NULL, 3, embedding, NULL);
         PL_exit_flags |= PERL_EXIT_DESTRUCT_END;
         perl_run(my_perl);
+
+        PerlWrapper_Hash_STORE = newXS("PerlWrapperHash::STORE", XS_PerlWrapper_HASH_STORE, __FILE__);
+        PerlWrapper_Hash_FETCH = newXS("PerlWrapperHash::FETCH", XS_PerlWrapper_HASH_FETCH, __FILE__);
+        PerlWrapper_Scalar_STORE = newXS("PerlWrapperScalar::STORE", XS_PerlWrapper_SCALAR_STORE, __FILE__);
+        PerlWrapper_Scalar_FETCH = newXS("PerlWrapperScalar::FETCH", XS_PerlWrapper_SCALAR_FETCH, __FILE__);
+
+
     };
 
     ~PerlContext() noexcept
     {
+        if (my_perl == nullptr)
+            return;
+        PL_perl_destruct_level = 1;
         perl_destruct(my_perl);
         perl_free(my_perl);
 	PERL_SYS_TERM();
+
+        printf("Exit PerlContext\n");
     };
 
+    PerlContext &operator=(const PerlContext &other) = delete;
+    PerlContext(PerlContext &&other) : my_perl(other.my_perl) { other.my_perl = nullptr; }
 
-    template<typename... TData>
-    void writeVariable(TData&&... data) noexcept {
-        typedef typename std::decay<typename std::tuple_element<sizeof...(TData) - 1,std::tuple<TData...>>::type>::type RealDataType;
-
-        setTable<RealDataType>(my_perl, Globals, std::forward<TData>(data)...);
+    bool load(const char *f) {
+        std::ifstream infile(f);
+        std::string str((std::istreambuf_iterator<char>(infile)),std::istreambuf_iterator<char>());
+        return execute(str);
     }
 
+    bool execute(const std::string &str) {
+        SV *r = eval_pv( str.c_str(), TRUE);
+    }
 
+    /* https://perldoc.perl.org/perlguts.html#Stashes-and-Globs */
+    bool bind(std::string str, Map_Type &m) {
+        const char *n = str.c_str(); char c;
+        c = (*n++);
+        HV *hash = get_hv(n, GV_ADD);
+        HV *inter = newHV();
+        SV *tie = newRV_noinc((SV*)inter);
+        HV *stash = gv_stashpv("PerlWrapperHash", GV_ADD);
+        sv_bless(tie, stash);
+        hv_magic(hash, (GV*)tie, PERL_MAGIC_tied);
 
+        MAGIC *mg = sv_magicext((SV *)tie,
+                                0,
+                                PERL_MAGIC_ext,
+                                &my_vtbl,
+                                (const char*)(new Map_Tie{this, m}),
+                                sizeof(Map_Tie));
 
-    template<typename TDataType, typename TData>
-    static void setTable(PerlInterpreter *my_perl, Globals_t g, const char* index, TData&& data) noexcept
+    }
+
+    bool bind(std::string str, std::string &m) {
+
+        const char *n = str.c_str(); char c;
+        c = (*n++);
+        SV *sv = get_sv(n, GV_ADD);
+        SV *inter = newSVpv(m.c_str(),0);
+        SV *tie = newRV_noinc((SV*)inter);
+        HV *stash = gv_stashpv("PerlWrapperScalar", GV_ADD);
+        sv_bless(tie, stash);
+        hv_magic(sv, (GV*)tie, PERL_MAGIC_tiedscalar);
+
+        MAGIC *mg = sv_magicext((SV *)tie,
+                                0,
+                                PERL_MAGIC_ext,
+                                &my_vtbl,
+                                (const char*)(new Scalar_Tie{this, m}),
+                                sizeof(Map_Tie));
+    }
+
+    static XSPROTO(XS_PerlWrapper_HASH_STORE)
     {
-        auto p1 = Pusher<typename std::decay<TDataType>::type>::push(my_perl, std::forward<TData>(data));
-        //lua_setglobal(state, index);
-        p1.release();
+        int cnt = 0; SV *self, *keysv, *valsv;
+        dXSARGS;
+
+        PERL_UNUSED_ARG(cv);
+        if(items != 3)
+            croak("Usage: PerlWrapper::Store(self, key, val)");
+
+        self = ST(0);
+        keysv = ST(1);
+        valsv = ST(2);
+        SP -= items;
+
+        MAGIC *mg;
+        if ((mg = mg_findext((SV*)self, PERL_MAGIC_ext, &my_vtbl))) {
+            Map_Tie *priv = (Map_Tie *)mg->mg_ptr;
+
+            STRLEN key_len, val_len;
+            const char *key = SvPV(keysv, key_len);
+            const char *val = SvPV(valsv, val_len);
+            std::string k = std::string(key, key_len);
+            std::string v = std::string(val, val_len);
+
+            DBG_PRINTF("set: %p['%s'] = '%s'\n", self, key, val);
+
+            priv->v[k] = v;
+
+        } else {
+            DBG_PRINTF("get: %p ! no magic\n", self);
+        }
+        XSRETURN(cnt);
+    }
+
+    static XSPROTO(XS_PerlWrapper_HASH_FETCH)
+    {
+        int cnt = 0; SV *self, *keysv;
+        dXSARGS;
+
+        PERL_UNUSED_ARG(cv);
+        if(items != 2)
+            croak("Usage: PerlWrapper::Fetch(self, key)");
+
+        self = ST(0);
+        keysv = ST(1);
+        SP -= items;
+
+        MAGIC *mg;
+        if ((mg = mg_findext((SV*)self, PERL_MAGIC_ext, &my_vtbl))) {
+            Map_Tie *priv = (Map_Tie *)mg->mg_ptr;
+
+            STRLEN key_len, val_len;
+            const char *key = SvPV(keysv, key_len);
+            std::string k = std::string(key, key_len);
+
+            if (priv->v.find(k) == priv->v.end()) {
+                DBG_PRINTF("self: %p['%s'] note present (created)\n", self, key);
+            }
+
+            std::string v = priv->v[k];
+            DBG_PRINTF("get: %p['%s'] : '%s'\n", self, key, v.c_str());
+
+            XPUSHs(sv_2mortal(newSVpv(v.c_str(),0)));
+            cnt++;
+        } else {
+            XPUSHs(&PL_sv_undef);
+            cnt++;
+            DBG_PRINTF("get: %p ! no magic\n", self);
+        }
+
+        XSRETURN(cnt);
     }
 
 
-    /**************************************************/
-    /*                 PUSH OBJECT                    */
-    /**************************************************/
-    struct PushedObject {
-        PushedObject(PerlInterpreter *my_perl_, int num_ = 1) : my_perl(my_perl_), num(num_) {}
-        ~PushedObject() {  }
+    static XSPROTO(XS_PerlWrapper_SCALAR_STORE)
+    {
+        int cnt = 0; SV *self, *keysv, *valsv;
+        dXSARGS;
 
-        PushedObject& operator=(const PushedObject&) = delete;
-        PushedObject(const PushedObject&) = delete;
-        PushedObject& operator=(PushedObject&& other) { std::swap(my_perl, other.my_perl); std::swap(num, other.num); return *this; }
-        PushedObject(PushedObject&& other) : my_perl(other.my_perl), num(other.num) { other.num = 0; }
+        PERL_UNUSED_ARG(cv);
+        if(items != 2)
+            croak("Usage: PerlWrapper::Store(self, key, val)");
 
-        PushedObject operator+(PushedObject&& other) && { PushedObject obj(my_perl, num + other.num); num = 0; other.num = 0; return obj; }
-        void operator+=(PushedObject&& other) { assert(my_perl == other.my_perl); num += other.num; other.num = 0; }
+        self = ST(0);
+        valsv = ST(1);
+        SP -= items;
 
-        auto getState() const -> PerlInterpreter * { return my_perl; }
-        auto getNum() const -> int { return num; }
+        MAGIC *mg;
+        if ((mg = mg_findext((SV*)self, PERL_MAGIC_ext, &my_vtbl))) {
+            Scalar_Tie *priv = (Scalar_Tie *)mg->mg_ptr;
 
-        int release() { const auto n = num; num = 0; return n; }
-        void pop() { num = 0; }
-        void pop(int n) { num -= n; }
+            STRLEN val_len;
+            const char *val = SvPV(valsv, val_len);
+            std::string v = std::string(val, val_len);
 
-    private:
-        PerlInterpreter *my_perl;
-        int num = 0;
-    };
+            DBG_PRINTF("set: %p = '%s'\n", self, val);
 
-    /**************************************************/
-    /*                PUSH FUNCTIONS                  */
-    /**************************************************/
+            priv->v = v;
 
-    // the Pusher structures allow you to push a value on the stack
-    //  - static const int minSize : minimum size on the stack that the value can have
-    //  - static const int maxSize : maximum size on the stack that the value can have
-    //  - static int push(const LuaContext&, ValueType) : pushes the value on the stack and returns the size on the stack
-
-    // implementation for custom objects
-    template<typename TType, typename = void>
-    struct Pusher {
-        static const int minSize = 1;
-        static const int maxSize = 1;
-
-        template<typename TType2>
-        static PushedObject push(PerlInterpreter *my_perl, TType2&& value) noexcept {
-            PushedObject obj{my_perl, 1};
-
-            return obj;
+        } else {
+            DBG_PRINTF("get: %p ! no magic\n", self);
         }
-    };
+        XSRETURN(cnt);
+    }
+
+    static XSPROTO(XS_PerlWrapper_SCALAR_FETCH)
+    {
+        int cnt = 0; SV *self, *keysv;
+        dXSARGS;
+
+        PERL_UNUSED_ARG(cv);
+        if(items != 1)
+            croak("Usage: PerlWrapper::Fetch(self, key)");
+
+        self = ST(0);
+        SP -= items;
+
+        MAGIC *mg;
+        if ((mg = mg_findext((SV*)self, PERL_MAGIC_ext, &my_vtbl))) {
+            Scalar_Tie *priv = (Scalar_Tie *)mg->mg_ptr;
+
+            STRLEN key_len, val_len;
+
+            std::string v = priv->v;
+            DBG_PRINTF("get: %p : '%s'\n", self, v.c_str());
+
+            XPUSHs(sv_2mortal(newSVpv(v.c_str(),0)));
+            cnt++;
+        } else {
+            XPUSHs(&PL_sv_undef);
+            cnt++;
+            DBG_PRINTF("get: %p ! no magic\n", self);
+        }
+
+        XSRETURN(cnt);
+    }
+
+
+
+
+
+
 
 private:
-    PerlInterpreter *my_perl;
 
 
     static char **const_to_char(const char **a) {
@@ -153,21 +343,28 @@ private:
 
 };
 
-// C function pointers
-template<typename TReturnType, typename... TParameters>
-struct PerlContext::Pusher<TReturnType (*)(TParameters...)>
-{
-    // using the function-pushing implementation
-    typedef Pusher<TReturnType (TParameters...)>
-    SubPusher;
-    static const int minSize = SubPusher::minSize;
-    static const int maxSize = SubPusher::maxSize;
 
-    template<typename TType>
-    static PushedObject push(PerlInterpreter *my_perl, TType value) noexcept {
-        return SubPusher::push(my_perl, value);
+XS(XS_some_func)
+{
+    dXSARGS;
+    char *str_from_perl, *str_from_c;
+    MAGIC *mg;
+    if ((mg = mg_findext((SV*)cv, PERL_MAGIC_ext, &my_vtbl))) {
+        /* this is really ours, not another module's PERL_MAGIC_ext */
+        struct my_priv_data_t *priv = (struct my_priv_data_t *)mg->mg_ptr;
+        printf("magic %x\n", priv->a);
+    } else {
+        printf("no magic\n");
     }
-};
+
+    /* get SV*s from the stack usign ST(x) and friends, do stuff to them */
+    printf("Test\n");
+
+    /* do your c thing calling back to your application, or whatever */
+
+    /* pack up the c retval into an sv again and return it on the stack */
+    XSRETURN(1);
+}
 
 
 #endif

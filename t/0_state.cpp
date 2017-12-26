@@ -1,19 +1,20 @@
 #include "../perlwrapper.h"
 
+template <typename RET>
+RET evalto(const char *str){
+    RET v;
+    return v;
+}
+
 int main (int argc, char **argv) {
 
     PerlContext c;
 
-    struct Foo {
-        static int increment(int x)
-        {
-            return x + 1;
-        }
-    };
+    std::function<int (int,int)> f = [](int a, int b) ->int{ return a+b; };
+    c.writeFunction<int(int,int)>("add", f);
+    c.execute("add();");
 
-    c.writeVariable("f", &Foo::increment);
-
-    //c.executeCode<int>("return h(8)");
+    assert(c.evalToInt("add(1,2)") == 3);
 
     return 0;
 }

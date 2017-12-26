@@ -4,7 +4,7 @@ PERL_CCOPTS=$(shell export PATH=$(CURDIR)/staticperl.build/bin:$$PATH; perl -MEx
 PERL_LDOPTS=$(shell export PATH=$(CURDIR)/staticperl.build/bin:$$PATH; perl -MExtUtils::Embed -e ldopts)
 
 test:
-	g++ -g  -std=c++14 $(PERL_CCOPTS)  0_state.cpp -o 0_state.exe $(PERL_LDOPTS); ./0_state.exe
+	g++ -g  -std=c++17 $(PERL_CCOPTS)  0_state.cpp -o 0_state.exe $(PERL_LDOPTS); ./0_state.exe
 
 prepare:
 	sudo apt install libperl-dev

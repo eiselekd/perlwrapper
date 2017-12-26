@@ -55,6 +55,9 @@ struct my_priv_data_t {
 
 struct my_priv_data_t a{0xfafa};
 
+
+
+
 class PerlContext;
 
 
@@ -64,7 +67,13 @@ class PerlContext;
 class PerlContext {
 private:
     PerlInterpreter *my_perl = nullptr;
+
+    enum Globals_t { Globals }; // tag for "global variables"
+
 public:
+
+    template<typename T>
+    struct tag {};
 
     template <typename Val>
     struct tie_data {
@@ -78,7 +87,6 @@ public:
     typedef tie_data<std::string> Scalar_Tie;
 
     int num;
-    enum Globals_t { Globals }; // tag for "global variables"
 
     CV *PerlWrapper_Hash_STORE;
     CV *PerlWrapper_Hash_FETCH;
@@ -180,6 +188,75 @@ public:
                                 (const char*)(new Scalar_Tie{this, m}),
                                 sizeof(Map_Tie));
     }
+
+
+
+/*
+// any function
+// this specialization is not directly called, but is called by other specializations
+template<typename TReturnType, typename... TParameters>
+struct LuaContext::Pusher<TReturnType (TParameters...)>
+{
+
+}
+
+
+*/
+
+
+    template<typename FunctionType>
+    void bind(std::string str, FunctionType&& f) noexcept {
+
+        typedef typename FunctionTypeDetector<FunctionType>::type
+            DetectedFunctionType;
+        auto p1 = Pusher<typename std::decay<DetectedFunctionType>::type>::push(this, std::forward<FunctionType>(f));
+    }
+
+
+
+
+
+
+private:
+
+
+
+
+
+    struct PushedObject {
+        PushedObject(PerlContext* state_, int num_ = 1) : state(state_), num(num_) {}
+        int release() { return 1; }
+        PerlContext *state;
+        int num;
+    };
+
+
+
+
+    template<typename T>
+    static PushedObject push(PerlContext* state, T&& value)
+    {
+        return Pusher<typename std::decay<T>::type>::push(state, std::forward<T>(value));
+    }
+
+
+ // implementation for custom objects
+    template<typename TType, typename = void>
+    struct Pusher {
+        static const int minSize = 1;
+        static const int maxSize = 1;
+
+        template<typename TType2>
+        static PushedObject push(PerlContext* state, TType2&& value) noexcept {
+            printf("Bind1::push\n");
+            return PushedObject{state, 1};
+        }
+    };
+
+
+
+
+
 
     static XSPROTO(XS_PerlWrapper_HASH_STORE)
     {
@@ -321,10 +398,77 @@ public:
 
 
 
+    // this structure has a "size" int static member which is equal to the total of the push min size of all the types
+    template<typename... TTypes>
+    struct PusherTotalMinSize;
+
+    // this structure has a "size" int static member which is equal to the total of the push max size of all the types
+    template<typename... TTypes>
+    struct PusherTotalMaxSize;
+
+    // this structure has a "size" int static member which is equal to the maximum size of the push of all the types
+    template<typename... TTypes>
+    struct PusherMinSize;
+
+    // this structure has a "size" int static member which is equal to the maximum size of the push of all the types
+    template<typename... TTypes>
+    struct PusherMaxSize;
 
 
 
 private:
+
+    // turns a type into a tuple
+    // void is turned into std::tuple<>
+    // existing tuples are untouched
+    template<typename T>
+    struct Tupleizer;
+
+    // this structure takes a pointer to a member function type and returns the base function type
+    template<typename TType>
+    struct RemoveMemberPointerFunction { typedef void type; };          // required because of a compiler bug
+
+    // this structure takes any object and detects its function type
+    template<typename TObjectType>
+    struct FunctionTypeDetector { typedef typename RemoveMemberPointerFunction<decltype(&std::decay<TObjectType>::type::operator())>::type type; };
+
+    // this structure takes a function arguments list and has the "min" and the "max" static const member variables, whose value equal to the min and max number of parameters for the function
+    // the only case where "min != max" is with boost::optional at the end of the list
+    template<typename... TArgumentsList>
+    struct FunctionArgumentsCounter {};
+
+    // true is the template parameter is a boost::optional
+    template<typename T>
+    struct IsOptional : public std::false_type {};
+
+
+
+    template<typename TType, typename = void>
+    struct Reader {
+        typedef typename std::conditional<std::is_pointer<TType>::value, TType, TType&>::type
+        ReturnType;
+
+        static auto read(PerlContext* state, int index)
+            -> ReturnType
+        {
+        }
+    };
+
+
+    template<typename TRetValue, typename TCallback>
+    static auto readIntoFunction(PerlContext* /*state*/, tag<TRetValue>, TCallback&& callback, int /*index*/)
+        -> TRetValue
+    {
+        return callback();
+    }
+
+    template<typename TRetValue, typename TCallback, typename TFirstType, typename... TTypes>
+    static auto readIntoFunction(PerlContext* state, tag<TRetValue> retValueTag, TCallback&& callback, int index, tag<TFirstType>, tag<TTypes>... othersTags)
+        -> TRetValue
+    {
+
+    }
+
 
 
     static char **const_to_char(const char **a) {
@@ -348,27 +492,103 @@ private:
 };
 
 
-XS(XS_some_func)
+
+// this structure takes any object and detects its function type
+template<typename TRetValue, typename... TParameters>
+struct PerlContext::FunctionTypeDetector<TRetValue (TParameters...)>             { typedef TRetValue type(TParameters...); };
+
+template<typename TObjectType>
+struct PerlContext::FunctionTypeDetector<TObjectType*>                           { typedef typename FunctionTypeDetector<TObjectType>::type type; };
+
+// this structure takes a pointer to a member function type and returns the base function type
+template<typename TType, typename TRetValue, typename... TParameters>
+struct PerlContext::RemoveMemberPointerFunction<TRetValue (TType::*)(TParameters...)>                    { typedef TRetValue type(TParameters...); };
+template<typename TType, typename TRetValue, typename... TParameters>
+struct PerlContext::RemoveMemberPointerFunction<TRetValue (TType::*)(TParameters...) const>              { typedef TRetValue type(TParameters...); };
+template<typename TType, typename TRetValue, typename... TParameters>
+struct PerlContext::RemoveMemberPointerFunction<TRetValue (TType::*)(TParameters...) volatile>           { typedef TRetValue type(TParameters...); };
+template<typename TType, typename TRetValue, typename... TParameters>
+struct PerlContext::RemoveMemberPointerFunction<TRetValue (TType::*)(TParameters...) const volatile>     { typedef TRetValue type(TParameters...); };
+
+
+
+
+
+template <typename ReadType
+          >
+struct PerlContext::Reader<ReadType,
+          typename std::enable_if<std::is_integral<ReadType>::value>::type>
 {
-    dXSARGS;
-    char *str_from_perl, *str_from_c;
-    MAGIC *mg;
-    if ((mg = mg_findext((SV*)cv, PERL_MAGIC_ext, &my_vtbl))) {
-        /* this is really ours, not another module's PERL_MAGIC_ext */
-        struct my_priv_data_t *priv = (struct my_priv_data_t *)mg->mg_ptr;
-        printf("magic %x\n", priv->a);
-    } else {
-        printf("no magic\n");
+    static auto read(PerlContext * state, int index)
+        -> ReadType
+    {
+
+        printf("index:%d\n", index);
+    }
+};
+
+
+
+template<typename TReturnType, typename... TParameters>
+struct PerlContext::Pusher<TReturnType (*)(TParameters...)>
+{
+    static const int minSize = 1;
+    static const int maxSize = 1;
+
+    template<typename TFunctionObject>
+    static PushedObject push(PerlContext* state, TFunctionObject f) noexcept {
+        printf("Bind2Ex::push\n");
+
+        TFunctionObject *fn = 0;
+
+        callback2(state, *fn, 2, std::index_sequence_for<TParameters...>{});
+
+        return PushedObject{state, 1};
     }
 
-    /* get SV*s from the stack usign ST(x) and friends, do stuff to them */
-    printf("Test\n");
 
-    /* do your c thing calling back to your application, or whatever */
+private:
+    template<typename TFunctionObject, std::size_t... Idx>
+    static auto callback2(PerlContext* state, TFunctionObject&& toCall, int argumentsCount, std::index_sequence<Idx...>)
+        -> void
+    {
+        toCall(Reader<TParameters>::read(state,Idx)...);
 
-    /* pack up the c retval into an sv again and return it on the stack */
-    XSRETURN(1);
-}
+    }
+
+
+
+
+
+};
+
+
+
+
+
+
+
+// XS(XS_some_func)
+// {
+//     dXSARGS;
+//     char *str_from_perl, *str_from_c;
+//     MAGIC *mg;
+//     if ((mg = mg_findext((SV*)cv, PERL_MAGIC_ext, &my_vtbl))) {
+//         /* this is really ours, not another module's PERL_MAGIC_ext */
+//         struct my_priv_data_t *priv = (struct my_priv_data_t *)mg->mg_ptr;
+//         printf("magic %x\n", priv->a);
+//     } else {
+//         printf("no magic\n");
+//     }
+
+//     /* get SV*s from the stack usign ST(x) and friends, do stuff to them */
+//     printf("Test\n");
+
+//     /* do your c thing calling back to your application, or whatever */
+
+//     /* pack up the c retval into an sv again and return it on the stack */
+//     XSRETURN(1);
+// }
 
 
 #endif
